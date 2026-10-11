@@ -66,3 +66,11 @@ systemctl restart sshd.service
 apt-get update
 
 exec bash
+
+cat > /etc/chrony.conf <<EOF
+server ntp0.ntp-servers.net iburst prefer minstratum 4
+local stratum 5
+allow 0.0.0.0/0
+EOF
+
+systemctl restart chronyd 
