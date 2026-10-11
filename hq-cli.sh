@@ -61,3 +61,5 @@ cat > /etc/hosts <<EOF
 172.16.2.1 docker.au-team.irpo
 192.168.100.2 hq-srv.au-team.irpo
 EOF
+
+apt-get update && apt-get install -y yandex-browser-stable
