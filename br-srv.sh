@@ -46,9 +46,97 @@ echo "- Баннер создан"
 
 
 echo "- Скачиваем файл инвентаря"
+apt-get update
+
+apt-get install -y task-samba-dc
+
+for service in smb nmb krb5kdc slapd bind;
+do
+  systemctl disable $service --now;
+done
+
+rm -f /etc/samba/smb.conf
+
+rm -f /etc/cache/smb.conf
+
+rm -rf /var/lib/samba 
+rm -rf /var/cache/samba
+
+mkdir -p /var/lib/samba/sysvol
+
+samba-tool domain provision \
+  --realm="AU-TEAM.IRPO" \
+  --domain="AU-TEAM" \
+  --server-role="dc" \
+  --dns-backend="SAMBA_INTERNAL" \
+  --option="dns forwarder=192.168.100.2" \
+  --adminpass="P@ssw0rd" 
+
+systemctl enable --now samba
+
+/bin/cp -f /var/lib/samba/private/krb5.conf /etc/krb5.conf
+
+systemctl restart samba
+
+cat > "/etc/net/ifaces/enp7s1/resolv.conf" <<EOF
+search au-team.irpo
+nameserver 77.88.8.8
+EOF
+
+systemctl restart network
+
+echo "P@ssw0rd" | kinit Administrator@AU-TEAM.IRPO
+
+samba-tool group add hq
+
+for i in {1..5};
+do
+  samba-tool user add hquser$i P@ssw0rd;
+  samba-tool user setexpiry hquser$i --noexpiry;
+  samba-tool group addmembers "hq" hquser$i;
+done
+
+cat > /etc/chrony.conf <<EOF
+server 172.16.2.1 iburst
+EOF
+
+systemctl restart chronyd
+
 apt-get update && apt-get install -y ansible sshpass 
-cd /etc/ansible
-wget raw.githubusercontent.com/19zammik86-source/DEMO/refs/heads/main/inventory.yml
+
+cat > /etc/ansible/inventory.yml <<EOF
+Networking:
+  hosts:
+    hq-rtr:
+      ansible_host: 192.168.100.1
+      ansible_user: net_admin
+      ansible_password: P@ssw0rd
+      ansible_port: 2027
+    br-rtr:
+      ansible_host: 192.168.0.1
+      ansible_user: net_admin
+      ansible_password: P@ssw0rd
+      ansible_port: 2027
+Servers:
+  hosts:
+    hq-srv:
+      ansible_host: 192.168.100.2
+      ansible_user: sshuser
+      ansible_password: P@ssw0rd
+      ansible_port: 2027
+    br-srv:
+      ansible_host: 192.168.0.2
+      ansible_user: sshuser
+      ansible_password: P@ssw0rd
+      ansible_port: 2027
+Clients:
+  hosts:
+    hq-cli:
+      ansible_host: 192.168.200.4
+      ansible_user: sshuser
+      ansible_password: P@ssw0rd
+      ansible_port: 2027
+EOF
 
 ansible -m ping all
 
@@ -97,5 +185,63 @@ docker compose up -d
 
 docker compose ps
 
-cd /etc/ansible
-wget raw.githubusercontent.com/19zammik86-source/DEMO/refs/heads/main/get.yml
+cat > /etc/ansible/get.yml <<EOF
+- name: Get_hostname
+  hosts: hq-srv,hq-cli
+  gather_facts: true
+  tasks:
+    - name: Create info directory
+      file:
+        path: /etc/ansible/PC_INFO
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Save hostname and ip
+      copy:
+        dest: /etc/ansible/PC_INFO/{{ ansible_hostname }}.yml
+        content: |
+          Hostname: {{ ansible_hostname }}
+          IP_Address: {{ ansible_default_ipv4.address }}
+      delegate_to: localhost
+EOF
+
+ansible-playbook /etc/ansible/get.yml
+
+mount /dev/sr0 /mnt
+
+printf '%s\n' \
+'#!/bin/bash' \
+'' \
+'csv_file="$1"' \
+'' \
+'# Create OU' \
+'awk -F '"'"';'"'"' '"'"'NR>1 {print $5}'"'"' "$csv_file" | sort | uniq | while read ou;' \
+'do' \
+$'\tsamba-tool ou add OU="$ou",DC=au-team,DC=irpo;' \
+'done' \
+'' \
+'# Create Users' \
+'while IFS=";" read -r firstName lastName role phone ou street zip city country password;' \
+'do' \
+$'\tif [ "$firstName" == "First Name" ];' \
+$'\tthen' \
+$'\t\tcontinue' \
+$'\tfi' \
+'' \
+$'\tusername="${firstName,,}.${lastName,,}"' \
+'' \
+$'\tsamba-tool user add "$username" P@ssw0rd1 \\' \
+$'\t\t--given-name="$firstName" \\' \
+$'\t\t--surname="$lastName" \\' \
+$'\t\t--telephone-number="$phone" \\' \
+$'\t\t--job-title="$role" \\' \
+$'\t\t--userou="OU=$ou"' \
+$'\tsamba-tool user setexpiry "$username" --noexpiry' \
+'done < "$csv_file"' \
+> import_user.sh
+
+chmod +x import_user.sh
+
+./import_user.sh /mnt/Users.csv
